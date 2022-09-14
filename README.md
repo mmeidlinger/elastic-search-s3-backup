@@ -1,6 +1,25 @@
 # About
 This repository shows how to backup indices from ElasticSearch to Amazon S3 in the Amazon Cloud. [AWS CloudFormation](https://aws.amazon.com/cloudformation/) templates are provided to automate creation of an S3 bucket where the index backups will be stored as well as an EC2 instance with an Elastic Search installation to test hands-on.
 
+![images](images/architecture.png)
+
+* [About](#about)
+* [Table of Contents](#table-of-contents)
+* [Preparation and Deployment](#preparation-and-deployment)
+   * [S3 Bucket](#s3-bucket)
+   * [EC2 Instance with ElasticSearch](#ec2-instance-with-elasticsearch)
+* [Backup to S3](#backup-to-s3)
+   * [Backup to S3 Standard and S3 Intelligent Tiering Storage Class](#backup-to-s3-standard-and-s3-intelligent-tiering-storage-class)
+      * [S3 Standard](#s3-standard)
+      * [S3 Intelligent Tiering](#s3-intelligent-tiering)
+   * [Backup to Glacier  Storage classes](#backup-to-glacier--storage-classes)
+      * [Backup to S3 Glacier Instant Retrieval](#backup-to-s3-glacier-instant-retrieval)
+      * [Backup to Glacier Flexible Retrieval](#backup-to-glacier-flexible-retrieval)
+* [Restore Snapshots](#restore-snapshots)
+   * [Restore from S3 Storage Classes or Glacier Instant Retrieval](#restore-from-s3-storage-classes-or-glacier-instant-retrieval)
+   * [Restore from Glacier Flexible Retrieval (and Deep Archive)](#restore-from-glacier-flexible-retrieval-and-deep-archive)
+* [IAM Permissions](#iam-permissions)
+* [Conclusion](#conclusion)
 # Preparation and Deployment
 ## S3 Bucket
 Open up [CloudFormation in the AWS Console](https://console.aws.amazon.com/cloudformation) and click on **Create Stack** (with new resources). Select **Upload a template file** and select the [`s3bucket.yaml`](cloudformation/s3bucket.yaml) template provided in this repo. Click **Next**, enter a name for the stack (e.g. `es-bucket`), again click **Next** and create the stack.
@@ -8,18 +27,22 @@ Open up [CloudFormation in the AWS Console](https://console.aws.amazon.com/cloud
 Deployment will take a couple of minutes and will create an S3 bucket with [SSE-KMS](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingKMSEncryption.html) default encryption enabled as well as a corresponding [KMS key](https://aws.amazon.com/kms/). Furthermore, an [S3 Lifecycle configuration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html) is created to progressively move backups to colder storage tiers and eventually delete them.
 
 After the stack finished deploying, select it in the console and review the **Outputs Tab**. It will show the [ARN](https://docs.aws.amazon.com/general/latest/gr/aws-arns-and-namespaces.html) of the S3 bucket and KMS key, as follows:
-![images](images/s3bucket-stack-output.png). Save these ARNs as we will need them for deploying the instance stack.
+![images](images/s3bucket-stack-output.png)
+Save these ARNs as we will need them for deploying the instance stack.
 
 ## EC2 Instance with ElasticSearch
-Next, we deploy another stack what will
+Next, we deploy a stack with an EC2 instance that runs elastic search. Create another stack based on the [`instance.yaml`](cloudformation/instance.yaml) file as you did before. When prompted to configure parameters, add the S3 bucket ARN and the KMS key ARN, and leave other paramters as default. 
 
-
+Once the stack deployed, open up the [EC2 Console](https://console.aws.amazon.com/ec2/v2/home#Instances) and connect to the instance:
+![images](images/ssm-connect.png)
+Once we established a command line connection to the ElasticSearch instance, we will control it via the local REST API to setup snapshot repositories on S3 as well as triggering index backup and restore.
 
 # Backup to S3
+
 This example uses [ElasticSearch's Snapshot and Resore functionality](https://www.elastic.co/guide/en/elasticsearch/reference/8.4/snapshot-restore.html), leveraging [S3 to store the snapshot repository](https://www.elastic.co/guide/en/elasticsearch/reference/8.4/repository-s3.html).
 
 ## Backup to S3 Standard and S3 Intelligent Tiering Storage Class
-### S3 Staddard
+### S3 Standard
 Setup a backup repository, get the bucket from the environment variable 
 ```shell
 # Grab the name of the bucket from the environment variable and substitute it in the json below
@@ -83,9 +106,9 @@ Now let's create a second snapshot:
 ```shell
 curl -X PUT "localhost:9200/_snapshot/my_s3_repository_standard/snapshot_2?wait_for_completion=true&pretty"
 ```
-Go to the S3 console and check the `test-standard` prefix in your bucket. All objects will be in the Standard storage class.
+Go to the [S3 console](https://s3.console.aws.amazon.com/s3/buckets) and check the `test-standard` prefix in your bucket. All objects will be in the Standard storage class.
 
-### S3 Intelligent 
+### S3 Intelligent Tiering
 Repeat the same steps process for the `intelligent-tiering` storage class with a repository base path of `test-it`:
 ```shell
 # Grab the name of the bucket from the environment variable and substitute it in the json below
@@ -191,9 +214,7 @@ curl -X PUT "localhost:9200/_snapshot/my_s3_repository_gir/snapshot_2?wait_for_c
 This command succeeds. Inspecting the objects under the `test-gir` prefix in the bucket, you can see that new and updated objects are again created in the Standard storage class. You either need to move them manually again or wait for the Lifecycle configuration to transition them.
 
 ### Backup to Glacier Flexible Retrieval
-For this example, we will follow the same process as for instant retrieval.
-
-Notice you could also do the same for Glacier Deep Archive, but we go with Flexible Retrieval to speed up the restore. 
+For this example, we will follow the same process as above, moving Standard Tier objects to the glacier flexible retrieval class:
 ```shell
 # Grab the name of the bucket from the environment variable and substitute it in the json below
 echo $S3_BUCKET
@@ -285,9 +306,9 @@ with output
 }
 ```
 
-## Restore Snapshots
+# Restore Snapshots
 
-### Restore from S3 Storage Classes or Glacier Instant Retrieval
+## Restore from S3 Storage Classes or Glacier Instant Retrieval
 ```shell
 curl -X POST "localhost:9200/_snapshot/my_s3_repository_standard/snapshot_2/_restore?wait_for_completion=true&pretty" -H 'Content-Type: application/json' -d'
 {
@@ -439,7 +460,8 @@ This will download all objects in the `test-standard`prefix into a directory on 
 
 This worked, because thus far, our ElasticSearch EC2 instance had all the required permissions to access the S3 bucket as well as the KMS key configured to encrypt objects in that bucket. The same holds true for interactions triggered via the ElasticSearch API.
 
-Navigate now to [IAM Roles](https://console.aws.amazon.com/iamv2/home#/roles) in your AWS Console and Search for `ElasticSearchInstanceRole`. Select the Role and review the Permission Policies. Now delete the `AccessToKmsKey` Permission policy from the role and try again the same command to download the files. This time, you will receive an error because you no longer have access to the KMS key required to decrypt the objects prior to download:
+Now let's review and alter the permissions and investigate the effects.
+Navigate to [IAM Roles](https://console.aws.amazon.com/iamv2/home#/roles) in your AWS Console and Search for `ElasticSearchInstanceRole`. Select the Role and review the Permission Policies. Now delete the `AccessToKmsKey` Permission policy from the role and try again the same command to download the files. This time, you will receive an error because you no longer have access to the KMS key required to decrypt the objects prior to download:
 ```
 An error occurred (AccessDenied) when calling the GetObject operation: The ciphertext refers to a customer master key that does not exist, does not exist in this region, or you are not allowed to access.
 ```
