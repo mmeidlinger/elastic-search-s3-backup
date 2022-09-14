@@ -37,6 +37,12 @@ Once the stack deployed, open up the [EC2 Console](https://console.aws.amazon.co
 ![images](images/ssm-connect.png)
 Once we established a command line connection to the ElasticSearch instance, we will control it via the local REST API to setup snapshot repositories on S3 as well as triggering index backup and restore.
 
+To start out with, let's inspect the status of the ElasticSearch deployment and query for indices
+```bash
+systemctl status elasticsearch.service
+curl -X GET "localhost:9200/_cat/indices?v"
+```
+
 # Backup to S3
 
 This example uses [ElasticSearch's Snapshot and Resore functionality](https://www.elastic.co/guide/en/elasticsearch/reference/8.4/snapshot-restore.html), leveraging [S3 to store the snapshot repository](https://www.elastic.co/guide/en/elasticsearch/reference/8.4/repository-s3.html).
@@ -57,8 +63,9 @@ curl -X PUT "localhost:9200/_snapshot/my_s3_repository_standard?pretty" -H 'Cont
   }
 }
 '
+```
 Next, trigger creation of a snapshot
-```shell
+```bash
 curl -X PUT "localhost:9200/_snapshot/my_s3_repository_standard/snapshot_1?wait_for_completion=true&pretty"
 ```
 outputs
@@ -133,7 +140,7 @@ Notice how the second snapshot was created substantially faster.
 Again checking the S3 console for the `test-it` prefix in your bucket, you find that all objects will be in the Intelligent Tiering storage class.
 
 ## Backup to Glacier  Storage classes
-S3 glacier classes are [currenty not supported by ElasticSearch](https://www.elastic.co/guide/en/elasticsearch/reference/8.4/repository-s3.html#repository-s3-repository): 
+S3 glacier classes are [currenty not directly ssupported by ElasticSearch](https://www.elastic.co/guide/en/elasticsearch/reference/8.4/repository-s3.html#repository-s3-repository): 
 >  Due to the extra complexity with the Glacier class lifecycle, it is not currently supported by this repository type.
 
 This may change soon, as AWS released the [Instant Retrieval (IR) storage class](https://aws.amazon.com/about-aws/whats-new/2021/11/amazon-s3-glacier-instant-retrieval-storage-class) in November 2021, which simplifies the lifecycle because objects can be directly retrieved without [explicitly restoring](https://aws.amazon.com/premiumsupport/knowledge-center/restore-s3-object-glacier-storage-class/) them first. A [corresponing feature request exists in GitHub](https://github.com/elastic/elasticsearch/issues/81351).
