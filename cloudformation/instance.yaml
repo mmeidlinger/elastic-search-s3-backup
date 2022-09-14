@@ -1,0 +1,160 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: 'Creates an EC2 instance, installs ElasticSearch with an index filled with test data'
+
+Parameters:
+  ElasticSearchInstanceImageID:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  ElasticSearchVersion: 
+    Type: String
+    Default: '7.16.3'
+  ElasticSearchInstanceType:
+    Description: Amazon EC2 instance type for the Elastic Search Instance
+    Type: String
+    Default: m5.2xlarge
+  S3BucketArn:
+    Type: String
+  S3KeyArn: 
+    Type: String
+
+
+Resources:
+  ElasticSearchInstanceRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "* required"
+    Properties:
+      Path: /
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy'
+      Policies:
+        - PolicyName: AccessToS3Bucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 's3:ListBucket'
+                  - 's3:GetBucketLocation'
+                  - 's3:ListBucketMultipartUploads'
+                  - 's3:ListBucketVersions'
+                Resource: !Ref 'S3BucketArn'
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:DeleteObject'
+                  - 's3:AbortMultipartUpload'
+                  - 's3:ListMultipartUploadParts'
+                  - 's3:RestoreObject'
+                Resource: !Sub '${S3BucketArn}/*'
+        - PolicyName: AccessToKmsKey
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'kms:Decrypt'
+                  - 'kms:GenerateDataKey'
+                Resource: !Ref S3KeyArn
+      Tags:
+        - Key: StackName
+          Value: !Ref AWS::StackName
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+        Version: '2012-10-17'
+  ElasticSearchInstanceProfile:
+      Type: AWS::IAM::InstanceProfile
+      Properties:
+        Roles:
+          - !Ref 'ElasticSearchInstanceRole'
+        Path: /
+  ElasticSearchInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSH
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+
+  ElasticSearchInstance:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+        ResourceSignal:
+          Timeout: PT15M
+          Count: 1
+    Properties:
+      IamInstanceProfile: !Ref ElasticSearchInstanceProfile
+      ImageId: !Ref ElasticSearchInstanceImageID
+      InstanceType: !Ref ElasticSearchInstanceType
+      SecurityGroupIds:
+        - !Ref ElasticSearchInstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: 'ElasticSearchInstance'
+      UserData: 
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash -xe
+            # Get the latest CloudFormation package
+            yum update -y aws-cfn-bootstrap
+            # Set an exit handler to notify CloudFormation on success or failure of this setup script
+            function exit_handler {
+              exit_status=$?
+              SUCCESS=false
+              if [[ $exit_status -eq 0 ]]; then
+                  SUCCESS=true
+              fi
+              # Signal success/failure back to CloudFormation wait condition
+              /opt/aws/bin/cfn-signal --success $SUCCESS --stack ${AWS::StackId} --resource ElasticSearchInstance --region ${AWS::Region}
+            }
+            # Configure exit handler to signal script status back to CFN
+            trap "exit_handler" EXIT
+
+            # Install newest version of aws-cli
+            yum remove -y aws-cli
+            cd /tmp
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip awscliv2.zip
+            ./aws/install
+            ln -s /usr/local/bin/aws /bin/aws
+            aws --version
+
+            # Download and install elastic search and corresponding plugins
+            wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-${ElasticSearchVersion}-x86_64.rpm
+            wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-${ElasticSearchVersion}-x86_64.rpm.sha512
+            sha512sum -c elasticsearch-${ElasticSearchVersion}-x86_64.rpm.sha512
+            rpm --install elasticsearch-${ElasticSearchVersion}-x86_64.rpm
+            cd /usr/share/elasticsearch/
+            bin/elasticsearch-plugin install --batch discovery-ec2
+            bin/elasticsearch-plugin install --batch repository-s3
+            systemctl start elasticsearch.service
+            systemctl enable elasticsearch.service
+            curl localhost:9200/_cluster/health?pretty
+
+            # Install script to generate ElasticSearch Test Data
+            yum install -y git
+            pip3 install nest_asyncio tornado
+            git clone https://github.com/oliver006/elasticsearch-test-data.git /usr/share/elasticsearch-test-data
+            python3 /usr/share/elasticsearch-test-data/es_test_data.py --force-init-index=True  --count=3000000 --index-name=test_data --es-url='http://localhost:9200' --http-upload-timeout=5 --batch-size=50000
+
+            # Add S3 bucket name to profile 
+            mkdir -p /etc/profile.d
+            cat <<EOT > /etc/profile.d/s3bucket.sh
+            #!/usr/bin/env bash    
+            export S3_BUCKET=$(echo "${S3BucketArn}" | awk -F  ':' '{print $NF}')
+            EOT
+            chmod +x /etc/profile.d/s3bucket.sh
+

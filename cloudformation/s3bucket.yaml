@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: 'The AWS CloudFormation template creates a KMS encryption key and a encrypted S3 bucket using the encryption key'
+
+Resources:
+  S3Key:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-s3
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+  S3KeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/S3LogBackup
+      TargetKeyId:
+        Ref: S3Key
+
+  # Encrypted S3 Bucket for Storage
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            KMSMasterKeyID: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:${S3KeyAlias}'
+            SSEAlgorithm: 'aws:kms'
+      PublicAccessBlockConfiguration:
+            BlockPublicAcls : true
+            BlockPublicPolicy : true
+            IgnorePublicAcls : true
+            RestrictPublicBuckets : true
+      LifecycleConfiguration:
+        Rules:
+          - Id: LogArchiveRule
+            Status: Enabled
+            ExpirationInDays: 730
+            Transitions:
+              - TransitionInDays: 1
+                StorageClass: GLACIER_IR
+              - TransitionInDays: 365
+                StorageClass: DEEP_ARCHIVE
+
+Outputs:
+    S3KeyArn:
+      Description: 'ARN of KMS key used to encrypt objects in the S3 bucket'
+      Value: !GetAtt S3Key.Arn
+    S3BucketArn:
+      Description: 'ARN of Encrypted S3 Bucket'
+      Value: !GetAtt  S3Bucket.Arn
